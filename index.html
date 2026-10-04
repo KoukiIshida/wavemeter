@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -276,7 +275,8 @@ document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState=
 function defaultSettings(){
   return { thinkSec:60, guessSec:60, meterMin:0, meterMax:20,
            tiers:[{err:0,pts:3},{err:1,pts:2},{err:2,pts:1}],
-           clearMul:2, clearAdd:0, practiceFirst:false };
+           clearMul:2, clearAdd:0, practiceFirst:false,
+           weights:[1,2,4], weightsV:2 };   // 数字の出やすさ ①両端・真ん中／②その隣／③その他（1つの数字あたりの重み）
 }
 const DEFAULT_RULE_SLIDES=[{img:null, groups:[
   '毎回ランダムで<b>出題者</b>を1人決めます。それ以外の全員が<b>解答者</b>です。',
@@ -291,7 +291,35 @@ function normalizeSettings(s){
   s.tiers=(Array.isArray(s.tiers)?s.tiers:d.tiers).map(t=>({err:toInt(t.err), pts:toInt(t.pts)})).filter(t=>!isNaN(t.err)&&!isNaN(t.pts));
   s.tiers.sort((a,b)=>a.err-b.err);
   s.practiceFirst=!!s.practiceFirst;
+  let w=Array.isArray(s.weights)?s.weights.map(toInt):[];
+  // 旧初期値（1:2:1）のまま保存されていたデータは、正しい初期値（1:2:4）に直す
+  if(s.weightsV!==2 && w.join(',')==='1,2,1') w=[1,2,4];
+  s.weightsV=2;
+  s.weights = w.length===3 && w.every(x=>!isNaN(x)&&x>=0) && w.some(x=>x>0) ? w : d.weights.slice();
   return s;
+}
+/**
+ * 数字の分類（0=①／1=②／2=③）
+ * ①両端の数字と真ん中の数字（数字の個数が偶数なら真ん中の2つ）
+ * ②両端から1つずれた数字と、真ん中から1つずれた数字（偶数なら真ん中2つの外側）
+ * ③その他
+ */
+function numberClasses(min, max){
+  const sum=min+max;
+  const mids = sum%2===0 ? [sum/2] : [Math.floor(sum/2), Math.ceil(sum/2)];
+  const c1=new Set([min, max, ...mids]);
+  const c2=new Set([min+1, max-1, mids[0]-1, mids[mids.length-1]+1].filter(v=>v>=min && v<=max && !c1.has(v)));
+  const out=[];
+  for(let v=min; v<=max; v++) out.push({v, cls: c1.has(v)?0 : c2.has(v)?1 : 2});
+  return out;
+}
+/** 各数字の出る確率 [{v, cls, p}] */
+function numberProbs(s){
+  const list=numberClasses(s.meterMin, s.meterMax);
+  let total=list.reduce((a,x)=>a+s.weights[x.cls],0);
+  if(total<=0){ list.forEach(x=>x.p=1/list.length); return list; }
+  list.forEach(x=>x.p=s.weights[x.cls]/total);
+  return list;
 }
 function mergeAppData(d){
   const m=Object.assign(defaultAppData(), d||{});
@@ -465,9 +493,9 @@ function snapshotFor(pid){
   return {
     type:'state', title:GAME_TITLE, phase:gs.phase, name:pname(pid),
     label: r ? r.label : '', giverName: inRound ? pname(r.giverId) : '',
-    isGiver, target: isGiver ? r.target : null,   // お題はホスト画面だけに表示（スマホには送らない）
+    isGiver, target: isGiver && gs.phase!=='selected' ? r.target : null,   // 数字は「出題開始」から。お題はホスト画面だけ（スマホには送らない）
     meter:{min:s.meterMin, max:s.meterMax, tiers:s.tiers},
-    timer: isGiver ? timerInfo() : null,
+    timer: isGiver && gs.phase==='think' ? timerInfo() : null,   // 予想シンキングタイムの時間は出題者には出さない
     roundId: r ? r.id : null
   };
 }
@@ -540,7 +568,13 @@ function chooseGiver(except){
   }
   return pool[Math.floor(Math.random()*pool.length)];
 }
-function randomTarget(){ const s=S(); return s.meterMin + Math.floor(Math.random()*(s.meterMax-s.meterMin+1)); }
+/** 出題者の数字を、管理ページで設定した出やすさ（重み）でランダムに選ぶ */
+function randomTarget(){
+  const list=numberProbs(normalizeSettings(S()));
+  let x=Math.random();
+  for(const it of list){ x-=it.p; if(x<0) return it.v; }
+  return list[list.length-1].v;
+}
 function drawGiver(except){
   if(connectedPids().length<MIN_PLAYERS){ alert(`出題者と解答者で、接続中の参加者が${MIN_PLAYERS}人以上必要です`); return; }
   const onBoard = gs.round && gs.round.item ? [itemKey(gs.round.item)] : [];
@@ -806,8 +840,6 @@ function renderHost(){
         <button class="primary big" data-act="start" ${n>=MIN_PLAYERS?'':'disabled'}>ゲームスタート ▶</button>
         <button class="ghost" data-act="start-norule" ${n>=MIN_PLAYERS?'':'disabled'}>ルール説明をとばして開始</button>
       </div>
-      <p class="muted">最低${MIN_PLAYERS}人から遊べます ／ 出題シンキングタイム ${s.thinkSec}秒・予想シンキングタイム ${s.guessSec}秒 ／ メーター ${s.meterMin}〜${s.meterMax}<br>
-        クリア条件：${clearFormula(s)} 点以上</p>
     </div>`;
   }
   else if(ph==='rule'){
@@ -842,7 +874,7 @@ function renderHost(){
       main=`<p style="font-size:22px;margin:0">出題者は…</p>
         <div class="giver-big ${spinning?'spin':''}" id="giver-name">${spinning?'':esc(pname(r.giverId))+' さん'}</div>
         ${spinning?'':`${itemBlockHost(r)}
-        <p style="font-size:18px">${esc(pname(r.giverId))}さんのスマホに、数字が表示されています</p>
+        <p style="font-size:18px">「出題開始」を押すと、${esc(pname(r.giverId))}さんのスマホに数字が表示されます</p>
         <div class="btnbar"><button class="primary big" data-act="think">▶ 出題開始（シンキングタイム ${s.thinkSec}秒）</button></div>
         <div class="btnbar">
           <button class="small" data-act="swap">🔄 お題を変える</button>
@@ -998,10 +1030,12 @@ function renderSub(){
   if(s.isGiver){
     const m=s.meter;
     const t=s.timer;
-    html=`${head}<div class="role-banner">🎤 あなたが出題者です</div>
+    html = s.target==null
+      ? `${head}<div class="role-banner">🎤 あなたが出題者です</div>
+        <div class="p-center"><h2>ホストが「出題開始」を押すと<br>数字が表示されます</h2><p>お題はホストの画面を見てください</p></div>`
+      : `${head}<div class="role-banner">🎤 あなたが出題者です</div>
       <div class="p-item"><div class="lbl">あなたの数字（${m.min}〜${m.max}）</div><div class="p-num">${s.target}</div></div>
-      ${t?`<div class="p-item"><div class="lbl">${t.kind==='think'?'出題シンキングタイム':'予想シンキングタイム'}</div><div class="p-timer" id="sub-timer"></div></div>`
-        :'<div class="p-item muted">ホストが「出題開始」を押すとシンキングタイムが始まります</div>'}
+      ${t?`<div class="p-item"><div class="lbl">出題シンキングタイム</div><div class="p-timer" id="sub-timer"></div></div>`:''}
       ${meterHtml({min:m.min, max:m.max, tiers:m.tiers, target:s.target, zones:true})}
       ${legendHtml(m.tiers)}
       <p class="muted" style="font-size:13px;text-align:center">数字はあなたのスマホにだけ表示されています（お題はホストの画面を見てください）</p>`;
@@ -1061,6 +1095,11 @@ function renderSettings(){
         <div class="muted" style="font-size:13px;margin-top:4px">誤差＝出題者の数字と解答の差。小さい誤差から順に判定し、どれにも入らなければ0点です。</div></div>
       <div class="lbl">クリア条件</div><div class="row">問題数 × <input type="number" id="s-mul" value="${s.clearMul}"> ＋ <input type="number" id="s-add" value="${s.clearAdd}"> 点以上でクリア <span class="muted" id="s-clear-ex"></span></div>
       <div class="lbl">例題</div><div><label class="chk" style="margin:0"><input type="checkbox" id="s-practice" ${s.practiceFirst?'checked':''}><span>1問目を例題（練習・得点なし・問題数に数えない）にする</span></label></div>
+      <div class="lbl">数字の出やすさ</div><div>
+        <div class="row">①<input type="number" id="s-w1" value="${s.weights[0]}" min="0"> ：②<input type="number" id="s-w2" value="${s.weights[1]}" min="0"> ：③<input type="number" id="s-w3" value="${s.weights[2]}" min="0"></div>
+        <div class="muted" style="font-size:13px;margin-top:4px">1つの数字あたりの出やすさの比です（例：①1・②2なら、②の数字は①の数字の2倍出やすい）。0にするとその種類の数字は出ません。<br>
+          ①両端の数字と真ん中の数字（数字の個数が偶数なら真ん中の2つ）／②両端から1つずれた数字と、真ん中から1つずれた数字／③その他</div>
+        <div id="s-prob" style="margin-top:8px"></div></div>
     </div>
     <div id="s-errors" class="err-text" style="margin-top:10px"></div>
     <h3 style="margin-top:16px">メーターの見え方（例：出題者の数字が真ん中の場合）</h3>
@@ -1083,6 +1122,7 @@ function readSettings(){
   const v=id=>toInt(document.getElementById(id).value);
   const s={ thinkSec:v('s-think'), guessSec:v('s-guess'), meterMin:v('s-min'), meterMax:v('s-max'),
             clearMul:v('s-mul'), clearAdd:v('s-add'), practiceFirst:document.getElementById('s-practice').checked,
+            weights:[v('s-w1'), v('s-w2'), v('s-w3')], weightsV:2,
             tiers:adminTiers.map(t=>({err:toInt(t.err), pts:toInt(t.pts)})) };
   const errors=[];
   if(isNaN(s.thinkSec)||s.thinkSec<1) errors.push('出題シンキングタイムは1以上の整数で入力してください');
@@ -1096,8 +1136,22 @@ function readSettings(){
   const errs=s.tiers.map(t=>t.err).filter(x=>!isNaN(x));
   if(errs.some((x,i)=>errs.indexOf(x)!==i)) errors.push('同じ誤差の得点帯が重複しています');
   if(isNaN(s.clearMul)||isNaN(s.clearAdd)) errors.push('クリア条件の数字は整数で入力してください');
+  if(s.weights.some(x=>isNaN(x)||x<0)) errors.push('数字の出やすさは0以上の整数で入力してください');
+  else if(!s.weights.some(x=>x>0)) errors.push('数字の出やすさは、どれか1つは1以上にしてください');
   s.tiers.sort((a,b)=>a.err-b.err);
   return {s, errors};
+}
+/** 管理ページだけに出す確率表（ゲーム画面には出さない） */
+function renderProbTable(s, errors){
+  const el=document.getElementById('s-prob');
+  if(errors.some(e=>/メーター|出やすさ/.test(e))){ el.innerHTML=''; return; }
+  const list=numberProbs(s);
+  const pct=p=>(p*100).toFixed(1)+'%';
+  const names=['①両端・真ん中','②その隣','③その他'];
+  el.innerHTML=`<table style="max-width:760px"><thead><tr><th>種類</th><th>数字</th><th>1つあたり</th><th>種類の合計</th></tr></thead><tbody>
+    ${[0,1,2].map(c=>{ const xs=list.filter(x=>x.cls===c); if(!xs.length) return '';
+      return `<tr><td style="white-space:nowrap">${names[c]}</td><td>${xs.map(x=>x.v).join('、')}</td><td style="white-space:nowrap">${pct(xs[0].p)}</td><td style="white-space:nowrap">${pct(xs.reduce((a,x)=>a+x.p,0))}</td></tr>`; }).join('')}
+  </tbody></table>`;
 }
 function updateSettingsPreview(){
   const {s, errors}=readSettings();
@@ -1105,6 +1159,7 @@ function updateSettingsPreview(){
   const cnt=document.getElementById('s-count');
   cnt.textContent = (!isNaN(s.meterMin)&&!isNaN(s.meterMax)&&s.meterMax>s.meterMin) ? `（全${s.meterMax-s.meterMin+1}個の数字）` : '';
   document.getElementById('s-clear-ex').textContent = (!isNaN(s.clearMul)&&!isNaN(s.clearAdd)) ? `例：5問なら ${clearTarget(5,s)}点以上・10問なら ${clearTarget(10,s)}点以上` : '';
+  renderProbTable(s, errors);
   const pv=document.getElementById('s-preview');
   if(errors.some(e=>/メーター|誤差|点数|得点帯/.test(e))){ pv.innerHTML='<p class="muted">（設定を直すと表示されます）</p>'; return; }
   const tgt=Math.round((s.meterMin+s.meterMax)/2);
@@ -1179,6 +1234,8 @@ function renderRuleSlidesEditor(){
             <span class="spacer"></span>
             <button type="button" class="ghost" data-ract="group-up" ${gi===0?'disabled':''}>▲段</button>
             <button type="button" class="ghost" data-ract="group-down" ${gi===slide.groups.length-1?'disabled':''}>▼段</button>
+            <button type="button" class="ghost" data-ract="group-ins-above">⤒上に段を挿入</button>
+            <button type="button" class="ghost" data-ract="group-ins-below">⤓下に段を挿入</button>
             <button type="button" class="ghost" data-ract="group-del" ${slide.groups.length<=1?'disabled':''}>🗑段</button>
           </div>
           <div class="rule-edit rule-group-edit" contenteditable="true">${g||''}</div>
@@ -1204,6 +1261,12 @@ function attachRuleSlidesEvents(){
     else if(act==='group-up'){ [slide.groups[gi-1],slide.groups[gi]]=[slide.groups[gi],slide.groups[gi-1]]; renderRuleSlidesEditor(); }
     else if(act==='group-down'){ [slide.groups[gi+1],slide.groups[gi]]=[slide.groups[gi],slide.groups[gi+1]]; renderRuleSlidesEditor(); }
     else if(act==='group-del'){ slide.groups.splice(gi,1); renderRuleSlidesEditor(); }
+    else if(act==='group-ins-above'||act==='group-ins-below'){
+      const at = act==='group-ins-above' ? gi : gi+1;
+      slide.groups.splice(at,0,''); renderRuleSlidesEditor();
+      const el=document.querySelectorAll(`#rule-editor .rule-slide-card[data-si="${si}"] .rule-group-edit`)[at];
+      if(el) el.focus();
+    }
     else if(act==='fmt'){
       const editEl=groupBlock.querySelector('.rule-group-edit');
       editEl.focus();
