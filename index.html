@@ -286,14 +286,14 @@ const DEFAULT_RULE_SLIDES=[{img:null, groups:[
 ]}];
 function defaultAppData(){ return { ruleSlides:JSON.parse(JSON.stringify(DEFAULT_RULE_SLIDES)), settings:defaultSettings() }; }
 function normalizeSettings(s){
-  const d=defaultSettings(); s=Object.assign({}, d, s||{});
+  const d=defaultSettings(), oldV=s && s.weightsV; s=Object.assign({}, d, s||{});
   ['thinkSec','guessSec','meterMin','meterMax','clearMul','clearAdd'].forEach(k=>{ const v=toInt(s[k]); s[k]=isNaN(v)?d[k]:v; });
   s.tiers=(Array.isArray(s.tiers)?s.tiers:d.tiers).map(t=>({err:toInt(t.err), pts:toInt(t.pts)})).filter(t=>!isNaN(t.err)&&!isNaN(t.pts));
   s.tiers.sort((a,b)=>a.err-b.err);
   s.practiceFirst=!!s.practiceFirst;
   let w=Array.isArray(s.weights)?s.weights.map(toInt):[];
   // 旧初期値（1:2:1）のまま保存されていたデータは、正しい初期値（1:2:4）に直す
-  if(s.weightsV!==2 && w.join(',')==='1,2,1') w=[1,2,4];
+  if(oldV!==2 && w.join(',')==='1,2,1') w=[1,2,4];
   s.weightsV=2;
   s.weights = w.length===3 && w.every(x=>!isNaN(x)&&x>=0) && w.some(x=>x>0) ? w : d.weights.slice();
   return s;
